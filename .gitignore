@@ -12,6 +12,8 @@ __pycache__/
 venv/
 env/
 .venv/
+
+# Directories
 images/
 plots/
 logs/
