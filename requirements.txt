@@ -1,0 +1,8 @@
+openai
+python-dotenv
+numpy
+matplotlib
+pybullet
+opencv-python
+imageio
+
