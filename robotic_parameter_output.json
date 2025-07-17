@@ -2,12 +2,12 @@
   "parameters": {
     "spatula_type": {
       "value": "silicone",
-      "reasoning": "The pan appears to have a non-stick coating, and using a metal spatula could damage the surface. A wooden spatula is safer but may not be as effective at scraping due to its rigid and sometimes bulky shape. A silicone spatula provides enough flexibility and is safe for non-stick surfaces while being effective at scraping up grease or soft dirt.",
+      "reasoning": "The pan appears to have a non-stick coating, which can be damaged by metal spatulas. Silicone is gentle, flexible, and effective for scraping semi-liquid substances like the grease/dirt shown in the center of the pan, while also being safe for non-stick surfaces. A wooden spatula is also safe but less effective than silicone for scraping sticky residues.",
       "confidence": "high"
     },
     "force_value": {
-      "value": "5 N",
-      "reasoning": "Scraping relatively soft debris (like grease or ketchup) from a non-stick pan requires only moderate force. Excessive force is unnecessary and could damage the non-stick coating. Around 5 newtons is typical for controlled scraping without risking pan damage.",
+      "value": "3-5 N",
+      "reasoning": "Removing a small amount of surface-level, sticky residue like this (likely ketchup-based or grease) from a non-stick pan does not require excessive force, especially with a flexible silicone spatula. Too much force could damage the coating. A moderate force of 3-5 newtons (similar to lightly pressing with a hand) is appropriate.",
       "confidence": "high"
     }
   }
