@@ -28,7 +28,7 @@ class SlideToGoalEnv:
         self.goal_position = np.array([0.5, 0.5, 0])
 
         self.last_camera_target = None
-        self.last_camera_distance = 0.7
+        self.last_camera_distance = 0.7 #0.7
         self.last_camera_yaw = -45
         self.last_camera_pitch = -45
 
@@ -122,7 +122,7 @@ class SlideToGoalEnv:
 
         return self.get_state()
 
-    def render_views(self, topdown_path="topdown.png", tracker_path="tracker.png"):
+    def render_views(self, topdown_path="topdown.png", side_path="side.png", use_static_side=False):
         # Get block position for tracker view
         block_pos, _ = p.getBasePositionAndOrientation(self.block_id)
 
@@ -144,28 +144,40 @@ class SlideToGoalEnv:
             projectionMatrix=proj_matrix
         )
 
-        # ---- Tracker camera (match GUI debug camera) ----
-        if self.last_camera_target is None:
-            self.last_camera_target = block_pos
+        # ---- Side camera ----
+        if use_static_side:
+            # Static side view from initial position
+            view_matrix_side = p.computeViewMatrixFromYawPitchRoll(
+                cameraTargetPosition=[0.2, 0.2, 0],  # Always look at center
+                distance=self.last_camera_distance,
+                yaw=self.last_camera_yaw,
+                pitch=self.last_camera_pitch,
+                roll=0,
+                upAxisIndex=2
+            )
+        else:
+            # Tracker camera (match GUI debug camera) - follows the cube
+            if self.last_camera_target is None:
+                self.last_camera_target = block_pos
 
-        view_matrix_track = p.computeViewMatrixFromYawPitchRoll(
-            cameraTargetPosition=self.last_camera_target,
-            distance=self.last_camera_distance,
-            yaw=self.last_camera_yaw,
-            pitch=self.last_camera_pitch,
-            roll=0,
-            upAxisIndex=2
-        )
+            view_matrix_side = p.computeViewMatrixFromYawPitchRoll(
+                cameraTargetPosition=self.last_camera_target,
+                distance=self.last_camera_distance,
+                yaw=self.last_camera_yaw,
+                pitch=self.last_camera_pitch,
+                roll=0,
+                upAxisIndex=2
+            )
 
-        _, _, rgb_track, _, _ = p.getCameraImage(
+        _, _, rgb_side, _, _ = p.getCameraImage(
             width=512,
             height=512,
-            viewMatrix=view_matrix_track,
+            viewMatrix=view_matrix_side,
             projectionMatrix=proj_matrix,
         )
 
         Image.fromarray(rgb_top).save(topdown_path)
-        Image.fromarray(rgb_track).save(tracker_path)
+        Image.fromarray(rgb_side).save(side_path)
 
     def convert_video_to_gif(self, gif_path: str = "slide_demo.gif") -> None:
         if hasattr(self, "video_path") and os.path.exists(self.video_path):

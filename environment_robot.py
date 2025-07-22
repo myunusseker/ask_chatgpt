@@ -24,6 +24,8 @@ def move_to_xy(robot_id, target_xy, table_height, down_offset=0.05):
 
     for _ in range(300):
         p.stepSimulation()
+        time.sleep(1/60)
+
 
     # Move downward to insert
     target_pos[2] -= down_offset
@@ -35,6 +37,8 @@ def move_to_xy(robot_id, target_xy, table_height, down_offset=0.05):
 
     for _ in range(300):
         p.stepSimulation()
+        time.sleep(1/60)
+
 
     # Debug EE frame (XYZ axes)
     ee_state = p.getLinkState(robot_id, 11)
@@ -68,12 +72,26 @@ def main():
         useFixedBase=True
     )
 
+    # Joint indices for the 7 DOF arm (not including fingers)
+    joint_indices = [0, 1, 2, 3, 4, 5, 6]
+
+    # Default initial joint positions
+    initial_joint_positions = [0, -0.4, 0, -2.4, 0, 2.0, 0.8]
+
+    # Move to initial joint positions
+    # for i, pos in zip(joint_indices, initial_joint_positions):
+    #     p.resetJointState(robot_id, i, pos)
+    #     time.sleep(1/60)
+
+
     # Add fake hole (just for visuals)
     hole_pos = [0.6, 0.0, table_height + 0.015]
     p.loadURDF("cube_small.urdf", basePosition=hole_pos, globalScaling=0.03)
 
     for _ in range(200):
         p.stepSimulation()
+        time.sleep(1/60)
+
 
     # Command: move to hole and insert
     move_to_xy(robot_id, [0.6, 0.0], table_height)

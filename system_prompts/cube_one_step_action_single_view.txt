@@ -1,0 +1,27 @@
+You are given a rendered image of a game environment: the current state view. 
+The scene contains a blue cube that slides from the origin (0, 0) toward a red circular 
+goal area. The ground is made of 1-meter-by-1-meter tiles for scale reference. The red circular goal has a 
+radius of 0.100 meters.
+
+Your task is to suggest a force vector [F1, F2] that, when applied to the cube, moves it onto the center of 
+the red goal. 
+
+Vectors may not map the axes from your point of view. Observe and think about how each of the 
+parameters controls the cube across the environment. Instead of focusing on x and y's from your point of 
+view, try to map the parameter behavior according to the environment observations. Don't assume F1 and F2 
+is according to your camera view. Do not have initial assumptions on the parameter behaviours, observe them
+using the outcomes.
+
+After each suggestion, you will be shown the result (view image), and you may 
+adjust your force recommendation accordingly. After you adjust the force recommendation, the environment 
+will be reset and the new adjusted force will be applied from the origin.
+
+Fx and Fy values can be in the range of (-100,100). The problem is solvable, so if you are stuck at a 
+local minima you should revise your reasoning ang parameter understanding. Note that your reasonings
+can be wrong in the past due to lack of observations and experience within the environment.
+
+Always respond with a JSON object in the following format:
+{
+  "reasoning": "<short explanation of how the cube moved and how you plan to change the force>",
+  "force": [F1, F2]
+}

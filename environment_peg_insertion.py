@@ -1,437 +1,421 @@
-import os
-import time
-from typing import Tuple
-
-import cv2
-import numpy as np
 import pybullet as p
 import pybullet_data
-import imageio
-from PIL import Image
+import time
+import numpy as np
 
 
-class PegInsertionEnv:
-    """Environment where a Franka robot performs peg insertion task."""
-
-    def __init__(self, gui: bool = True, speed: int = 30):
-        self.speed = speed
-        self.gui = gui
-        if self.gui:
-            self.client = p.connect(p.GUI)
+class PegInsertionEnvironment:
+    def __init__(self, gui=True, hz=60):
+        """Initialize the peg insertion environment with robot and peg setup."""
+        self.hz = hz
+        
+        # Connect to simulation
+        if gui:
+            p.connect(p.GUI)
         else:
-            self.client = p.connect(p.DIRECT)
+            p.connect(p.DIRECT)
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
-        p.setGravity(0, 0, -9.8)
+        p.setGravity(0, 0, -9.81)
 
-        # Load environment
+        # Load ground and table
         self.plane_id = p.loadURDF("plane.urdf")
-        self.table_id = None
-        self.robot_id = None
-        self.peg_id = None
-        self.hole_id = None
-        
-        # Task parameters
-        self.table_height = 0.625
-        self.peg_start_height = self.table_height + 0.05
-        self.hole_position = np.array([0.5, 0.0, self.table_height + 0.001])  # Fixed hole position on table
-        self.hole_radius = 0.02  # 1.5cm radius
-        self.peg_radius = 0.012   # 1.2cm radius (slightly smaller than hole)
-        
-        # Robot parameters
-        self.robot_base_pos = [0, 0, self.table_height]  # On top of table
-        self.end_effector_link = 11  # Franka end effector link
-        
-        # Camera parameters
-        self.diagonal_camera_pos = [0.8, -0.8, 0.8]
-        self.diagonal_camera_target = [0.5, 0.0, self.table_height]
-        self.wrist_camera_offset = [0, 0, 0.05]  # Smaller offset from end effector
+        self.table_id = p.loadURDF("table/table.urdf", [0.5, 0, 0])
+        self.table_height = 0.62
 
-    def reset(self) -> np.ndarray:
-        p.resetSimulation()
-        p.setGravity(0, 0, -9.8)
-        
-        # Load plane
-        self.plane_id = p.loadURDF("plane.urdf")
-        
-        # Load table
-        table_pos = [0.5, 0, 0]
-        self.table_id = p.loadURDF("table/table.urdf", table_pos)
-        
-        # Load Franka robot
-        self.robot_id = p.loadURDF("franka_panda/panda.urdf", self.robot_base_pos, useFixedBase=True)
-        
-        # Set robot to initial pose (arm extended towards table)
-        self._set_robot_initial_pose()
-        
-        # Run simulation steps to stabilize
-        for _ in range(100):
-            p.stepSimulation()
-        
-        # Create peg (visual only, no collision for smooth insertion)
+        # Load Franka Panda
+        start_pos = [0, 0, self.table_height]
+        start_ori = p.getQuaternionFromEuler([0, 0, 0])
+        self.franka_id = p.loadURDF("franka_panda/panda.urdf", start_pos, start_ori, useFixedBase=True)
+
+        # Joint indices for the 7 DOF arm (not including fingers)
+        self.joint_indices = [0, 1, 2, 3, 4, 5, 6]
+        self.gripper_indices = [9, 10]  # Finger joint indices for Franka Panda
+        self.eef_index = 11  # End effector link index
+
+        # Default initial joint positions
+        initial_joint_positions = [0, -0.4, 0, -2.4, 0, 2.0, 0.8]
+
+        # Move to initial joint positions
+        for i, pos in zip(self.joint_indices, initial_joint_positions):
+            p.resetJointState(self.franka_id, i, pos)
+
+        # Open the gripper
+        gripper_open_positions = [0.04, 0.04]
+        for i, pos in zip(self.gripper_indices, gripper_open_positions):
+            p.resetJointState(self.franka_id, i, pos)
+
+        # Get current EEF pose
+        eef_state = p.getLinkState(self.franka_id, self.eef_index)
+        self.eef_pos = np.array(eef_state[4])  # position
+        self.eef_ori = eef_state[5]            # orientation (quaternion)
+
+        # Create and attach peg
+        self._create_and_attach_peg()
+
+        # Create insertion hole on table
+        self._create_insertion_hole()
+
+        # Close the gripper to hold the peg
+        self._close_gripper()
+
+        print("Peg insertion environment initialized successfully!")
+
+    def _create_and_attach_peg(self):
+        """Create the peg and attach it to the end effector."""
+        # Peg dimensions (rectangular prism)
+        self.peg_width = 0.024   # 2.4cm width (x-axis)
+        self.peg_depth = 0.024   # 1.2cm depth (y-axis)
+        self.peg_height = 0.08   # 8cm height (z-axis)
+
+        # Create peg collision and visual shapes
+        peg_collision = p.createCollisionShape(
+            shapeType=p.GEOM_BOX,
+            halfExtents=[self.peg_width/2, self.peg_depth/2, self.peg_height/2]
+        )
         peg_visual = p.createVisualShape(
-            shapeType=p.GEOM_CYLINDER,
-            radius=self.peg_radius,
-            length=0.08,
+            shapeType=p.GEOM_BOX,
+            halfExtents=[self.peg_width/2, self.peg_depth/2, self.peg_height/2],
             rgbaColor=[0, 1, 0, 1]  # Green peg
         )
-        
-        # Start peg at end effector
-        ee_pos = self._get_end_effector_position()
-        peg_start_pos = [ee_pos[0], ee_pos[1], ee_pos[2]-0.1]
-        
+
+        # Calculate proper peg position
+        peg_start_pos = [self.eef_pos[0], self.eef_pos[1], self.eef_pos[2] - self.peg_height / 2 + 0.02]
+
+        # Create peg body
         self.peg_id = p.createMultiBody(
-            baseMass=0,  # No mass since it's visual only
-            baseCollisionShapeIndex=-1,  # No collision
+            baseMass=1.0,
+            baseCollisionShapeIndex=peg_collision,
             baseVisualShapeIndex=peg_visual,
-            basePosition=peg_start_pos
-        )
-        
-        # Create hole as a recessed area on the table
-        # First create a visual ring around the hole
-        hole_ring_visual = p.createVisualShape(
-            shapeType=p.GEOM_CYLINDER,
-            radius=self.hole_radius + 0.005,  # Slightly larger ring
-            length=0.002,
-            rgbaColor=[0.5, 0.5, 0.5, 1]  # Gray ring
-        )
-        
-        # Create the actual hole (visual depression)
-        hole_visual = p.createVisualShape(
-            shapeType=p.GEOM_CYLINDER,
-            radius=self.hole_radius,
-            length=0.01,
-            rgbaColor=[0.2, 0.2, 0.2, 1]  # Dark hole
-        )
-        
-        # Ring around hole (visual only)
-        self.hole_ring_id = p.createMultiBody(
-            baseMass=0,
-            baseCollisionShapeIndex=-1,
-            baseVisualShapeIndex=hole_ring_visual,
-            basePosition=[self.hole_position[0], self.hole_position[1], self.hole_position[2]]
-        )
-        
-        # Hole itself (visual only, no collision to allow insertion)
-        self.hole_id = p.createMultiBody(
-            baseMass=0,
-            baseCollisionShapeIndex=-1,
-            baseVisualShapeIndex=hole_visual,
-            basePosition=[self.hole_position[0], self.hole_position[1], self.hole_position[2] - 0.005]
-        )
-        
-        # Attach peg to robot end effector initially
-        self._attach_peg_to_robot()
-        
-        return self.get_state()
-
-    def _set_robot_initial_pose(self):
-        """Set robot to initial pose with arm extended towards table."""
-        # Joint positions for a proper initial pose - arm reaching forward and down
-        joint_positions = [0, 0.3, 0, -2.0, 0, 2.3, 0.785]  # Proper downward-reaching pose
-        
-        for i in range(len(joint_positions)):
-            p.resetJointState(self.robot_id, i, joint_positions[i])
-            
-        # Set gripper to closed position
-        p.resetJointState(self.robot_id, 9, 0.04)   # Finger 1
-        p.resetJointState(self.robot_id, 10, 0.04)  # Finger 2
-        
-        # Enable position control for all joints
-        joint_indices = list(range(7))  # First 7 joints
-        p.setJointMotorControlArray(
-            self.robot_id,
-            joint_indices,
-            p.POSITION_CONTROL,
-            targetPositions=joint_positions,
-            forces=[87] * len(joint_indices)  # Joint torque limits
+            basePosition=peg_start_pos,
+            baseOrientation=self.eef_ori
         )
 
-    def _get_end_effector_position(self) -> np.ndarray:
-        """Get current end effector position."""
-        ee_state = p.getLinkState(self.robot_id, self.end_effector_link)
-        return np.array(ee_state[0])
-
-    def _get_end_effector_orientation(self) -> np.ndarray:
-        """Get current end effector orientation."""
-        ee_state = p.getLinkState(self.robot_id, self.end_effector_link)
-        return np.array(ee_state[1])  # Returns quaternion [x, y, z, w]
-
-    def _attach_peg_to_robot(self):
-        """Attach peg to robot end effector."""
-        self.peg_constraint = p.createConstraint(
-            parentBodyUniqueId=self.robot_id,
-            parentLinkIndex=self.end_effector_link,
+        # Create constraint to attach peg to end effector
+        self.peg_joint = p.createConstraint(
+            parentBodyUniqueId=self.franka_id,
+            parentLinkIndex=self.eef_index,
             childBodyUniqueId=self.peg_id,
             childLinkIndex=-1,
             jointType=p.JOINT_FIXED,
             jointAxis=[0, 0, 0],
-            parentFramePosition=[0, 0, -0.08],
-            childFramePosition=[0, 0, 0.04]
+            parentFramePosition=[0, 0, self.peg_height/2 - 0.02],
+            childFramePosition=[0, 0, 0],
+            parentFrameOrientation=[0, 0, 0, 1],
+            childFrameOrientation=[0, 0, 0, 1]
         )
 
-    def get_state(self) -> np.ndarray:
-        """Get current peg position."""
-        pos, _ = p.getBasePositionAndOrientation(self.peg_id)
-        return np.array(pos)
+        # Configure constraint for maximum rigidity
+        p.changeConstraint(self.peg_joint, maxForce=50000)
 
-    def apply_insertion_action(self, target_xy: list, record: bool = False, video_path: str = "peg_insertion.mp4") -> np.ndarray:
-        """
-        Apply peg insertion action.
-        Args:
-            target_xy: [x, y] target position for peg insertion
-            record: Whether to record video
-            video_path: Path to save video
-        """
-        if record:
-            os.makedirs("videos", exist_ok=True)
-            self.video_path = os.path.join("videos", video_path)
-            self.frames = []
-            
-        print(f"Inserting peg at position: {target_xy}")
-        
-        target_x, target_y = target_xy
-        
-        # Phase 1: Move above target position (approach)
-        print("Phase 1: Approaching target position...")
-        self._move_to_position([target_x, target_y, self.table_height + 0.1], record)
-        
-        # Phase 2: Insert peg (slow insertion)
-        print("Phase 2: Inserting peg...")
-        self._move_to_position([target_x, target_y, self.table_height - 0.02], record, slow=True)
-        
-        if record and self.frames:
-            height, width, _ = self.frames[0].shape
-            out = cv2.VideoWriter(self.video_path, cv2.VideoWriter_fourcc(*"mp4v"), 30, (width, height))
-            for frame in self.frames:
-                out.write(frame)
-            out.release()
-            print(f"Video saved to {self.video_path}")
-            
-        return self.get_state()
-    
+        print(f"Rectangular peg properly attached as fixed joint at position: {peg_start_pos}")
 
-    def move_to_xy(robot_id, target_xy, table_height, down_offset=0.1):
-        # Get current joint positions
-        joint_indices = [0, 1, 2, 3, 4, 5, 6]
-        current_joint_positions = [p.getJointState(robot_id, i)[0] for i in joint_indices]
+    def _create_insertion_hole(self):
+        """Create a hollow box (hole) on the table for peg insertion."""
+        # Hole dimensions - slightly larger than peg
+        clearance = 0.002  # 2mm clearance on each side
+        hole_width = self.peg_width + 2 * clearance   # Slightly wider than peg
+        hole_depth = self.peg_depth + 2 * clearance   # Slightly deeper than peg
+        hole_height = 0.05  # 5cm deep hole
+        wall_thickness = 0.02  # 2cm thick walls
 
-        # Define the target pose (x, y, z)
-        target_pos = [target_xy[0], target_xy[1], table_height + 0.15]
-        target_ori = p.getQuaternionFromEuler([np.pi, 0, 0])  # Facing down
+        # Position the hole on the table (you can adjust this position)
+        hole_pos = [0.4, 0.0, self.table_height + hole_height/2]
 
-        # Move to above target
-        joint_positions = p.calculateInverseKinematics(robot_id, 11, target_pos, target_ori)
-        for i, j in zip(joint_indices, joint_positions):
-            p.setJointMotorControl2(robot_id, i, p.POSITION_CONTROL, j)
-
-        for _ in range(100): p.stepSimulation()
-
-        # Insertion down
-        target_pos[2] -= down_offset
-        joint_positions = p.calculateInverseKinematics(robot_id, 11, target_pos, target_ori)
-        for i, j in zip(joint_indices, joint_positions):
-            p.setJointMotorControl2(robot_id, i, p.POSITION_CONTROL, j)
-
-        for _ in range(100): p.stepSimulation()
-
-    def _move_to_position(self, target_pos: list, record: bool = False, slow: bool = False):
-        """Move robot end effector to target position using inverse kinematics with proper orientation."""
-        import math
+        # Create the outer box (walls)
+        outer_width = hole_width + 2 * wall_thickness
+        outer_depth = hole_depth + 2 * wall_thickness
         
-        target_pos = np.array(target_pos)
+        outer_collision = p.createCollisionShape(
+            shapeType=p.GEOM_BOX,
+            halfExtents=[outer_width/2, outer_depth/2, hole_height/2]
+        )
+        outer_visual = p.createVisualShape(
+            shapeType=p.GEOM_BOX,
+            halfExtents=[outer_width/2, outer_depth/2, hole_height/2],
+            rgbaColor=[0.8, 0.8, 0.8, 1.0]  # Light gray
+        )
+
+        # Create the inner box (hole - this will be removed via compound shape)
+        inner_collision = p.createCollisionShape(
+            shapeType=p.GEOM_BOX,
+            halfExtents=[hole_width/2, hole_depth/2, hole_height/2 + 0.001]  # Slightly taller to ensure clean cut
+        )
+
+        # Create compound shape: outer box minus inner box
+        # We'll create 4 walls instead of using compound shapes for better physics
+        wall_positions = [
+            # Front wall
+            [hole_pos[0] + (hole_width/2 + wall_thickness/2), hole_pos[1], hole_pos[2]],
+            # Back wall  
+            [hole_pos[0] - (hole_width/2 + wall_thickness/2), hole_pos[1], hole_pos[2]],
+            # Left wall
+            [hole_pos[0], hole_pos[1] + (hole_depth/2 + wall_thickness/2), hole_pos[2]],
+            # Right wall
+            [hole_pos[0], hole_pos[1] - (hole_depth/2 + wall_thickness/2), hole_pos[2]]
+        ]
         
-        # Define target orientation - pointing straight down for peg insertion
-        target_orientation = p.getQuaternionFromEuler([math.pi, 0, 0])  # 180 degrees around X-axis
-        
-        # Use more steps for slower, more precise insertion
-        steps = 200 if slow else 120
-        
-        # Get current joint positions as starting point
-        current_joint_positions = [p.getJointState(self.robot_id, i)[0] for i in range(7)]
-        
-        for step in range(steps):
-            # Calculate inverse kinematics with both position and orientation constraints
-            joint_poses = p.calculateInverseKinematics(
-                bodyUniqueId=self.robot_id,
-                endEffectorLinkIndex=self.end_effector_link,
-                targetPosition=target_pos,
-                targetOrientation=target_orientation,
-                lowerLimits=[-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973],
-                upperLimits=[2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 3.7525, 2.8973],
-                jointRanges=[5.8, 3.5, 5.8, 3.0, 5.8, 3.8, 5.8],
-                restPoses=current_joint_positions,
-                maxNumIterations=100,
-                residualThreshold=0.01
+        wall_shapes = [
+            # Front and back walls (thin in x, full in y)
+            [wall_thickness/2, outer_depth/2, hole_height/2],
+            [wall_thickness/2, outer_depth/2, hole_height/2],
+            # Left and right walls (full in x, thin in y) 
+            [hole_width/2, wall_thickness/2, hole_height/2],
+            [hole_width/2, wall_thickness/2, hole_height/2]
+        ]
+
+        self.hole_walls = []
+        for i, (pos, shape) in enumerate(zip(wall_positions, wall_shapes)):
+            wall_collision = p.createCollisionShape(
+                shapeType=p.GEOM_BOX,
+                halfExtents=shape
+            )
+            wall_visual = p.createVisualShape(
+                shapeType=p.GEOM_BOX,
+                halfExtents=shape,
+                rgbaColor=[1.0, 0.0, 0.0, 1.0]  # Red color
             )
             
-            # Apply joint positions with proper control
-            joint_indices = list(range(7))  # First 7 joints
-            p.setJointMotorControlArray(
-                bodyUniqueId=self.robot_id,
-                jointIndices=joint_indices,
-                controlMode=p.POSITION_CONTROL,
-                targetPositions=joint_poses[:7],
-                forces=[87] * 7,  # Joint torque limits
-                positionGains=[0.1] * 7,  # Position gains for smoother movement
-                velocityGains=[1.0] * 7   # Velocity gains for damping
+            wall_id = p.createMultiBody(
+                baseMass=0,  # Static walls
+                baseCollisionShapeIndex=wall_collision,
+                baseVisualShapeIndex=wall_visual,
+                basePosition=pos
             )
-            
+            self.hole_walls.append(wall_id)
+
+        # Store hole information for reference
+        self.hole_position = hole_pos
+        self.hole_width = hole_width
+        self.hole_depth = hole_depth
+        self.hole_height = hole_height
+
+    def _close_gripper(self):
+        """Close the gripper to hold the peg."""
+        gripper_closed_positions = [0.01, 0.01]
+        for i, pos in zip(self.gripper_indices, gripper_closed_positions):
+            p.setJointMotorControl2(
+                self.franka_id,
+                i,
+                p.POSITION_CONTROL,
+                pos,
+                force=10,
+                positionGain=0.3,
+                velocityGain=1.0
+            )
+
+        # Let the gripper settle
+        for _ in range(10):
             p.stepSimulation()
-            
-            if self.gui:
-                sleep_time = (1 / self.speed) * (2 if slow else 1)  # Slower for insertion
-                time.sleep(sleep_time)
-                
-            if record:
-                # Capture frame for video
-                diagonal_view = self._get_diagonal_camera_image()
-                frame_bgr = cv2.cvtColor(np.array(diagonal_view), cv2.COLOR_RGB2BGR)
-                self.frames.append(frame_bgr)
-            
-            # Check if close enough to target
-            current_ee_pos = self._get_end_effector_position()
-            distance = np.linalg.norm(target_pos - current_ee_pos)
-            threshold = 0.01 if slow else 0.02  # More precise for slow insertion
-            if distance < threshold:
-                break
+            time.sleep(1/self.hz)
 
-    def _get_diagonal_camera_image(self) -> np.ndarray:
-        """Get diagonal view camera image."""
-        view_matrix = p.computeViewMatrix(
-            cameraEyePosition=self.diagonal_camera_pos,
-            cameraTargetPosition=self.diagonal_camera_target,
-            cameraUpVector=[0, 0, 1]
-        )
+    def move_smooth(self, target, duration=3.0, relative=True, stop_on_contact=False, contact_threshold=0.5):
+        """Move the robot with peg using smooth continuous linear interpolation.
         
-        proj_matrix = p.computeProjectionMatrixFOV(
-            fov=60, aspect=1.0, nearVal=0.1, farVal=3.1
-        )
+        Args:
+            target: 3D numpy array or list with target coordinates
+            duration: Duration of the movement in seconds
+            relative: If True, target is offset from current position. If False, target is absolute global coordinates.
+            stop_on_contact: If True, stop movement when peg contacts the table
+            contact_threshold: Force threshold (N) to detect contact
+        """
+        # Get current end effector position
+        current_eef_state = p.getLinkState(self.franka_id, self.eef_index)
+        start_pos = np.array(current_eef_state[4])
         
-        _, _, rgb, _, _ = p.getCameraImage(
-            width=512,
-            height=512,
-            viewMatrix=view_matrix,
-            projectionMatrix=proj_matrix
-        )
-        
-        return rgb
-
-    def _get_wrist_camera_image(self) -> np.ndarray:
-        """Get wrist camera image."""
-        ee_pos = self._get_end_effector_position()
-        ee_state = p.getLinkState(self.robot_id, self.end_effector_link)
-        ee_orn = ee_state[1]
-        
-        # Calculate camera position relative to end effector
-        camera_pos = ee_pos + self.wrist_camera_offset
-        
-        # Camera looks down towards table
-        target_pos = [camera_pos[0], camera_pos[1], self.table_height]
-        
-        view_matrix = p.computeViewMatrix(
-            cameraEyePosition=camera_pos,
-            cameraTargetPosition=target_pos,
-            cameraUpVector=[0, 0, 1]
-        )
-        
-        proj_matrix = p.computeProjectionMatrixFOV(
-            fov=60, aspect=1.0, nearVal=0.1, farVal=3.1
-        )
-        
-        _, _, rgb, _, _ = p.getCameraImage(
-            width=512,
-            height=512,
-            viewMatrix=view_matrix,
-            projectionMatrix=proj_matrix
-        )
-        
-        return rgb
-
-    def render_views(self, diagonal_path="diagonal_view.png", wrist_path="wrist_view.png"):
-        """Render both camera views and save them."""
-        # Diagonal view
-        diagonal_rgb = self._get_diagonal_camera_image()
-        Image.fromarray(diagonal_rgb).save(diagonal_path)
-        
-        # Wrist view
-        wrist_rgb = self._get_wrist_camera_image()
-        Image.fromarray(wrist_rgb).save(wrist_path)
-
-    def get_insertion_success(self) -> bool:
-        """Check if peg insertion was successful."""
-        peg_pos = self.get_state()
-        hole_pos = self.hole_position
-        
-        # Check if peg is close to hole position (xy plane) - must be very precise
-        xy_distance = np.linalg.norm(peg_pos[:2] - hole_pos[:2])
-        
-        # Check if peg is at correct insertion depth
-        insertion_depth = hole_pos[2] - peg_pos[2]
-        proper_insertion = insertion_depth >= 0.02  # At least 2cm inserted
-        
-        # Success requires both precise alignment and proper insertion depth
-        return xy_distance < (self.hole_radius * 0.8) and proper_insertion
-
-    def get_reward(self) -> float:
-        """Calculate reward based on peg insertion quality."""
-        peg_pos = self.get_state()
-        hole_pos = self.hole_position
-        
-        # Distance in XY plane (alignment penalty)
-        xy_distance = np.linalg.norm(peg_pos[:2] - hole_pos[:2])
-        alignment_reward = max(0, (self.hole_radius - xy_distance) / self.hole_radius)
-        
-        # Insertion depth reward
-        insertion_depth = max(0, hole_pos[2] - peg_pos[2])
-        depth_reward = min(1.0, insertion_depth / 0.03)  # Reward for inserting up to 3cm
-        
-        # Precision bonus for being very close to hole center
-        precision_bonus = 2.0 if xy_distance < (self.hole_radius * 0.5) else 0.0
-        
-        # Insertion success bonus
-        success_bonus = 10.0 if self.get_insertion_success() else 0.0
-        
-        # Combined reward
-        reward = alignment_reward + depth_reward + precision_bonus + success_bonus - xy_distance
-        
-        return reward
-
-    def convert_video_to_gif(self, gif_path: str = "peg_insertion.gif") -> None:
-        """Convert recorded video to GIF."""
-        if hasattr(self, "video_path") and os.path.exists(self.video_path):
-            gif_path_full = os.path.join("videos", gif_path)
-            reader = imageio.get_reader(self.video_path)
-            fps = reader.get_meta_data()["fps"]
-            writer = imageio.get_writer(gif_path_full, fps=fps, loop=0)
-            for frame in reader:
-                writer.append_data(frame)
-            writer.close()
-            print(f"GIF saved to {gif_path_full}")
+        # Calculate target position based on relative flag
+        if relative:
+            target_pos = start_pos + np.array(target)
         else:
-            print("Video not found or not recorded yet.")
+            target_pos = np.array(target)
 
-    def close(self) -> None:
-        """Close the environment."""
+        # Calculate total number of steps for the duration
+        total_steps = int(duration * self.hz)
+        
+        # Check if GUI is enabled for proper sleep timing
+        gui_enabled = p.getConnectionInfo()['connectionMethod'] == p.GUI
+        
+        # Smooth movement with continuous interpolation
+        for step in range(total_steps):
+            # Check for contact if enabled
+            if stop_on_contact:
+                total_force = 0
+                
+                # Check contact with table
+                contact_points = p.getContactPoints(bodyA=self.peg_id, bodyB=self.table_id)
+                for contact in contact_points:
+                    normal_force = contact[9]  # Normal force magnitude
+                    total_force += abs(normal_force)
+                
+                # Check contact with all hole walls
+                for wall_id in self.hole_walls:
+                    wall_contacts = p.getContactPoints(bodyA=self.peg_id, bodyB=wall_id)
+                    for contact in wall_contacts:
+                        normal_force = contact[9]  # Normal force magnitude
+                        total_force += abs(normal_force)
+                
+                if total_force > contact_threshold:
+                    print(f"Contact detected! Total force: {total_force:.2f}N - Stopping movement")
+                    break
+            
+            # Calculate interpolation factor (0 to 1) with smooth acceleration/deceleration
+            t = step / (total_steps - 1) if total_steps > 1 else 1.0
+            
+            # Apply smooth S-curve (ease-in-out) for more natural motion
+            # Using smoothstep function: 3t² - 2t³
+            alpha = 3 * t**2 - 2 * t**3
+            
+            # Calculate current target position along the linear path
+            current_target = start_pos + alpha * (target_pos - start_pos)
+            
+            # Calculate IK for current target position
+            joint_positions = p.calculateInverseKinematics(
+                self.franka_id, 
+                self.eef_index, 
+                current_target, 
+                self.eef_ori,
+                maxNumIterations=100,
+                residualThreshold=1e-5
+            )
+
+            # Apply joint positions with motor control
+            for j, joint_pos in zip(self.joint_indices, joint_positions):
+                p.setJointMotorControl2(
+                    self.franka_id, 
+                    j, 
+                    p.POSITION_CONTROL, 
+                    joint_pos, 
+                    force=200,
+                    positionGain=0.1,
+                    velocityGain=1.0
+                )
+
+            # Step simulation
+            p.stepSimulation()
+            time.sleep(1/self.hz)
+
+    def render_views(self, save_images=True, image_prefix="peg_insertion"):
+        """Render camera views from wrist camera and diagonal side view.
+        
+        Args:
+            save_images: Whether to save images to disk
+            image_prefix: Prefix for saved image files
+            
+        Returns:
+            tuple: (wrist_rgb, wrist_depth, side_rgb, side_depth) as numpy arrays
+        """
+        # Get current end effector state for wrist camera
+        eef_state = p.getLinkState(self.franka_id, self.eef_index)
+        eef_pos = np.array(eef_state[4])
+        eef_ori = eef_state[5]  # quaternion
+        
+        # Convert quaternion to rotation matrix for camera orientation
+        eef_rot_matrix = p.getMatrixFromQuaternion(eef_ori)
+        eef_rot_matrix = np.array(eef_rot_matrix).reshape(3, 3)
+        
+        # Wrist camera setup (looking down from end effector)
+        wrist_cam_pos = eef_pos + np.array([-0.1, 0., 0.1])  # 5cm above end effector
+        wrist_target = eef_pos + np.array([0, 0, -0.1])   # Looking down
+        wrist_up = [0, 0, 1]  # Up direction
+        
+        # Diagonal side camera setup
+        side_cam_pos = np.array([0.3, 0.1, self.table_height + 0.2])  # Positioned diagonally
+        side_target = np.array([0.4, 0.0, self.table_height])  # Looking at hole position
+        side_up = [0, 0, 1]  # Up direction
+        
+        # Camera parameters
+        width, height = 640, 480
+        fov = 60  # Field of view
+        aspect = width / height
+        near = 0.01
+        far = 10.0
+        
+        # Compute view and projection matrices for wrist camera
+        wrist_view_matrix = p.computeViewMatrix(
+            cameraEyePosition=wrist_cam_pos,
+            cameraTargetPosition=wrist_target,
+            cameraUpVector=wrist_up
+        )
+        
+        # Compute view and projection matrices for side camera
+        side_view_matrix = p.computeViewMatrix(
+            cameraEyePosition=side_cam_pos,
+            cameraTargetPosition=side_target,
+            cameraUpVector=side_up
+        )
+        
+        # Projection matrix (same for both cameras)
+        projection_matrix = p.computeProjectionMatrixFOV(
+            fov=fov,
+            aspect=aspect,
+            nearVal=near,
+            farVal=far
+        )
+        
+        # Render wrist camera view
+        wrist_img = p.getCameraImage(
+            width=width,
+            height=height,
+            viewMatrix=wrist_view_matrix,
+            projectionMatrix=projection_matrix,
+            renderer=p.ER_BULLET_HARDWARE_OPENGL
+        )
+        
+        # Render side camera view  
+        side_img = p.getCameraImage(
+            width=width,
+            height=height,
+            viewMatrix=side_view_matrix,
+            projectionMatrix=projection_matrix,
+            renderer=p.ER_BULLET_HARDWARE_OPENGL
+        )
+        
+        # Extract RGB
+        wrist_rgb = np.array(wrist_img[2]).reshape(height, width, 4)[:, :, :3]  # Remove alpha
+        side_rgb = np.array(side_img[2]).reshape(height, width, 4)[:, :, :3]  # Remove alpha
+        
+        # Save images if requested
+        if save_images:
+            import os
+            from PIL import Image
+            
+            # Create directory if it doesn't exist
+            os.makedirs("images", exist_ok=True)
+            
+            # Save RGB images
+            Image.fromarray(wrist_rgb).save(f"images/{image_prefix}_wrist_rgb.png")
+            Image.fromarray(side_rgb).save(f"images/{image_prefix}_side_rgb.png")
+
+            print(f"Camera views saved to images/ with prefix '{image_prefix}'")
+
+        return wrist_rgb, side_rgb
+
+    def disconnect(self):
+        """Disconnect from the simulation."""
         p.disconnect()
 
 
+# Example usage
 if __name__ == "__main__":
-    env = PegInsertionEnv(gui=False)  # Use headless mode for testing
-    env.reset()
+    # Create environment
+    env = PegInsertionEnvironment(hz=60)
     
-    # Test insertion at hole location
-    hole_xy = env.hole_position[:2]
-    print(f"Applying insertion action at hole position: {hole_xy}")
-    #env.apply_insertion_action(hole_xy, record=False, video_path="peg_insertion_demo.mp4")
-    env.move_to_xy(env.robot_id, hole_xy, env.table_height)
+    # Move the robot with peg upward first
+    env.move_smooth(target=np.array([0.39, 0.0, env.table_height+0.12]), duration=3.0, relative=False)
+
+    print("Current position:", env.eef_pos)
+
+    # Move down towards table with collision detection
+    env.move_smooth(
+        target=np.array([0.0, 0.0, -0.05]), 
+        duration=3.0, 
+        relative=True, 
+        stop_on_contact=True, 
+        contact_threshold=1.0
+    )
     
-    # Render views
-    env.render_views("diagonal_view.png", "wrist_view.png")
+    # Render camera views after movement
+    print("Rendering camera views...")
+    wrist_rgb, wrist_depth, side_rgb, side_depth = env.render_views(save_images=True, image_prefix="after_insertion")
     
-    # Check success
-    success = env.get_insertion_success()
-    reward = env.get_reward()
-    print(f"Insertion successful: {success}")
-    print(f"Final reward: {reward:.3f}")
-    
-    env.close()
+    # Disconnect
+    env.disconnect()
