@@ -8,7 +8,8 @@ class PegInsertionEnvironment:
     def __init__(self, gui=True, hz=60):
         """Initialize the peg insertion environment with robot and peg setup."""
         self.hz = hz
-        
+        self.gui = gui
+
         # Connect to simulation
         if gui:
             p.connect(p.GUI)
@@ -206,7 +207,8 @@ class PegInsertionEnvironment:
         # Let the gripper settle
         for _ in range(10):
             p.stepSimulation()
-            time.sleep(1/self.hz)
+            if self.gui:
+                time.sleep(1/self.hz)
 
     def move_smooth(self, target, duration=3.0, relative=True, stop_on_contact=False, contact_threshold=0.5):
         """Move the robot with peg using smooth continuous linear interpolation.
@@ -291,14 +293,32 @@ class PegInsertionEnvironment:
 
             # Step simulation
             p.stepSimulation()
-            time.sleep(1/self.hz)
+            if self.gui:
+                time.sleep(1/self.hz)
 
-    def render_views(self, save_images=True, image_prefix="peg_insertion"):
+        # Update stored end effector position after movement
+        final_eef_state = p.getLinkState(self.franka_id, self.eef_index)
+        self.eef_pos = np.array(final_eef_state[4])
+        self.eef_ori = final_eef_state[5]
+
+    def get_current_position(self):
+        """Get the current end effector position (always up-to-date)."""
+        eef_state = p.getLinkState(self.franka_id, self.eef_index)
+        current_pos = np.array(eef_state[4])
+        current_ori = eef_state[5]
+        
+        # Update stored values
+        self.eef_pos = current_pos
+        self.eef_ori = current_ori
+        
+        return current_pos
+
+    def render_views(self, save_images=True, image_postfix="peg_insertion"):
         """Render camera views from wrist camera and diagonal side view.
         
         Args:
             save_images: Whether to save images to disk
-            image_prefix: Prefix for saved image files
+            image_postfix: Postfix for saved image files
             
         Returns:
             tuple: (wrist_rgb, wrist_depth, side_rgb, side_depth) as numpy arrays
@@ -312,19 +332,19 @@ class PegInsertionEnvironment:
         eef_rot_matrix = p.getMatrixFromQuaternion(eef_ori)
         eef_rot_matrix = np.array(eef_rot_matrix).reshape(3, 3)
         
-        # Wrist camera setup (looking down from end effector)
-        wrist_cam_pos = eef_pos + np.array([-0.1, 0., 0.1])  # 5cm above end effector
+        # Wrist camera setup (looking down from end effector, rotated 90 degrees)
+        wrist_cam_pos = eef_pos + np.array([-0.1, 0., 0.1])  # 10cm above end effector
         wrist_target = eef_pos + np.array([0, 0, -0.1])   # Looking down
-        wrist_up = [0, 0, 1]  # Up direction
+        wrist_up = [1, 0, 0]  # Rotated 90 degrees from [0, 1, 0] to [1, 0, 0]
         
         # Diagonal side camera setup
-        side_cam_pos = np.array([0.3, 0.1, self.table_height + 0.2])  # Positioned diagonally
+        side_cam_pos = np.array([0.5, 0.1, self.table_height + 0.2])  # Positioned diagonally
         side_target = np.array([0.4, 0.0, self.table_height])  # Looking at hole position
         side_up = [0, 0, 1]  # Up direction
         
-        # Camera parameters
-        width, height = 640, 480
-        fov = 60  # Field of view
+        # Camera parameters for VLM-optimized quality
+        width, height = 512, 512  # High resolution 4:3 aspect ratio for better detail
+        fov = 55  # Slightly narrower field of view for better focus
         aspect = width / height
         near = 0.01
         far = 10.0
@@ -351,27 +371,93 @@ class PegInsertionEnvironment:
             farVal=far
         )
         
-        # Render wrist camera view
+        # Enhanced rendering parameters for VLM-optimized quality
+        renderer = p.ER_BULLET_HARDWARE_OPENGL
+        flags = p.ER_SEGMENTATION_MASK_OBJECT_AND_LINKINDEX
+        
+        # Optimized lighting setup for VLM processing
+        light_direction = [-0.5, -0.5, -1]  # Softer angle from top
+        light_color = [1.2, 1.2, 1.2]  # Slightly brighter white light
+        light_distance = 1.5
+        light_ambient_coeff = 0.4  # Higher ambient for better shadow detail
+        light_diffuse_coeff = 0.8  # Strong diffuse lighting
+        light_specular_coeff = 0.3  # Reduced specular to avoid glare
+        
+        # Render wrist camera view with enhanced quality
         wrist_img = p.getCameraImage(
             width=width,
             height=height,
             viewMatrix=wrist_view_matrix,
             projectionMatrix=projection_matrix,
-            renderer=p.ER_BULLET_HARDWARE_OPENGL
+            lightDirection=light_direction,
+            lightColor=light_color,
+            lightDistance=light_distance,
+            lightAmbientCoeff=light_ambient_coeff,
+            lightDiffuseCoeff=light_diffuse_coeff,
+            lightSpecularCoeff=light_specular_coeff,
+            renderer=renderer,
+            flags=flags
         )
         
-        # Render side camera view  
+        # Render side camera view with enhanced quality
         side_img = p.getCameraImage(
             width=width,
             height=height,
             viewMatrix=side_view_matrix,
             projectionMatrix=projection_matrix,
-            renderer=p.ER_BULLET_HARDWARE_OPENGL
+            lightDirection=light_direction,
+            lightColor=light_color,
+            lightDistance=light_distance,
+            lightAmbientCoeff=light_ambient_coeff,
+            lightDiffuseCoeff=light_diffuse_coeff,
+            lightSpecularCoeff=light_specular_coeff,
+            renderer=renderer,
+            flags=flags
         )
         
-        # Extract RGB
+        # Extract RGB and apply VLM-optimized post-processing
         wrist_rgb = np.array(wrist_img[2]).reshape(height, width, 4)[:, :, :3]  # Remove alpha
         side_rgb = np.array(side_img[2]).reshape(height, width, 4)[:, :, :3]  # Remove alpha
+        
+        # Apply contrast enhancement and gamma correction for VLM processing
+        def enhance_for_vlm(image):
+            # Convert to float for processing
+            img_float = image.astype(np.float32) / 255.0
+            
+            # Apply slight gamma correction for better contrast
+            gamma = 1.1
+            img_float = np.power(img_float, 1.0/gamma)
+            
+            # Enhance contrast slightly
+            img_float = np.clip((img_float - 0.5) * 1.15 + 0.5, 0.0, 1.0)
+            
+            # Convert back to uint8
+            return (img_float * 255).astype(np.uint8)
+        
+        wrist_rgb = enhance_for_vlm(wrist_rgb)
+        side_rgb = enhance_for_vlm(side_rgb)
+        
+        # Add view labels to images for VLM clarity
+        def add_view_label(image, label_text):
+            from PIL import Image, ImageDraw, ImageFont
+            
+            # Convert numpy array to PIL Image
+            pil_image = Image.fromarray(image)
+            draw = ImageDraw.Draw(pil_image)
+            
+            # Calculate text position (top-left corner with padding)
+            text_position = (20, 472)
+            text_color = (255, 255, 255)  # White text
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size=32)
+            # Draw main text
+            draw.text(text_position, label_text, fill=text_color, font=font)
+
+            # Convert back to numpy array
+            return np.array(pil_image)
+        
+        # Add labels to the images
+        wrist_rgb_labeled = add_view_label(wrist_rgb, "WRIST VIEW")
+        side_rgb_labeled = add_view_label(side_rgb, "SIDE VIEW")
         
         # Save images if requested
         if save_images:
@@ -381,41 +467,118 @@ class PegInsertionEnvironment:
             # Create directory if it doesn't exist
             os.makedirs("images", exist_ok=True)
             
-            # Save RGB images
-            Image.fromarray(wrist_rgb).save(f"images/{image_prefix}_wrist_rgb.png")
-            Image.fromarray(side_rgb).save(f"images/{image_prefix}_side_rgb.png")
+            # Save labeled RGB images
+            Image.fromarray(wrist_rgb_labeled).save(f"images/wrist_{image_postfix}.png")
+            Image.fromarray(side_rgb_labeled).save(f"images/side_{image_postfix}.png")
 
-            print(f"Camera views saved to images/ with prefix '{image_prefix}'")
+            print(f"Camera views with labels saved to images/ with postfix '{image_postfix}'")
 
-        return wrist_rgb, side_rgb
+        return wrist_rgb_labeled, side_rgb_labeled
+
+    def reset(self):
+        """Reset the environment to initial state."""
+        # Reset robot to initial joint positions
+        initial_joint_positions = [0, -0.4, 0, -2.4, 0, 2.0, 0.8]
+        
+        # First, reset joint states
+        for i, pos in zip(self.joint_indices, initial_joint_positions):
+            p.resetJointState(self.franka_id, i, pos)
+
+        # Reset gripper to open position
+        gripper_open_positions = [0.04, 0.04]
+        for i, pos in zip(self.gripper_indices, gripper_open_positions):
+            p.resetJointState(self.franka_id, i, pos)
+
+
+        # Apply joint motor control to maintain reset positions
+        for j, joint_pos in zip(self.joint_indices, initial_joint_positions):
+            p.setJointMotorControl2(
+                self.franka_id, 
+                j, 
+                p.POSITION_CONTROL, 
+                joint_pos, 
+                force=200,
+                positionGain=0.3,
+                velocityGain=1.0
+            )
+        
+        # Apply gripper motor control
+        for i, pos in zip(self.gripper_indices, gripper_open_positions):
+            p.setJointMotorControl2(
+                self.franka_id,
+                i,
+                p.POSITION_CONTROL,
+                pos,
+                force=10,
+                positionGain=0.3,
+                velocityGain=1.0
+            )
+        # Apply motor control to ensure robot actually moves to reset positions
+        for _ in range(1):  # Give more time for the robot to settle
+            p.stepSimulation()
+            if self.gui:
+                time.sleep(1/self.hz)
+
+        # Update current EEF pose after robot has actually moved
+        eef_state = p.getLinkState(self.franka_id, self.eef_index)
+        self.eef_pos = np.array(eef_state[4])  # position
+        self.eef_ori = eef_state[5]            # orientation (quaternion)
+
+        # Reset peg position to be attached to end effector
+        if hasattr(self, 'peg_id'):
+            peg_start_pos = [self.eef_pos[0], self.eef_pos[1], self.eef_pos[2] - self.peg_height / 2 + 0.02]
+            p.resetBasePositionAndOrientation(self.peg_id, peg_start_pos, self.eef_ori)
+
+        # Close the gripper to hold the peg
+        self._close_gripper()
+
+        # Let the simulation settle more
+        for _ in range(50):
+            p.stepSimulation()
+            if self.gui:
+                time.sleep(1/self.hz)
+
+        # Final position update to ensure accuracy
+        final_eef_state = p.getLinkState(self.franka_id, self.eef_index)
+        self.eef_pos = np.array(final_eef_state[4])
+        self.eef_ori = final_eef_state[5]
+
+        print("Environment reset to initial state")
+        return self.eef_pos
 
     def disconnect(self):
         """Disconnect from the simulation."""
         p.disconnect()
+    
+    def close(self):
+        """Close the environment (alias for disconnect)."""
+        self.disconnect()
 
+    def apply_action(self, offset, initial_env=False):
+        self.move_smooth(target=np.array([0.41, 0.01, self.table_height+0.12]), duration=3.0, relative=False)
+        if initial_env:
+            self.move_smooth(target=np.array([0.0, 0.0, 0.04]), duration=3.0, relative=True)
+        else:
+            self.move_smooth(target=np.array([offset[0], offset[1], offset[2]]), duration=1.0, relative=True)
+            self.move_smooth(
+                target=np.array([0.0, 0.0, -0.08]), 
+                duration=3.0, 
+                relative=True, 
+                stop_on_contact=True, 
+                contact_threshold=1.0
+            )
 
 # Example usage
 if __name__ == "__main__":
     # Create environment
-    env = PegInsertionEnvironment(hz=60)
-    
-    # Move the robot with peg upward first
-    env.move_smooth(target=np.array([0.39, 0.0, env.table_height+0.12]), duration=3.0, relative=False)
+    env = PegInsertionEnvironment(gui=True, hz=60)
 
-    print("Current position:", env.eef_pos)
-
-    # Move down towards table with collision detection
-    env.move_smooth(
-        target=np.array([0.0, 0.0, -0.05]), 
-        duration=3.0, 
-        relative=True, 
-        stop_on_contact=True, 
-        contact_threshold=1.0
-    )
-    
+    env.apply_action(offset=np.array([0.01, 0.0, 0.0]))    
+    env.reset()
+    env.apply_action(offset=np.array([-0.01, 0.0, 0.0]))    
     # Render camera views after movement
     print("Rendering camera views...")
-    wrist_rgb, wrist_depth, side_rgb, side_depth = env.render_views(save_images=True, image_prefix="after_insertion")
+    wrist_rgb, side_rgb = env.render_views(save_images=True, image_postfix="after_insertion")
     
     # Disconnect
     env.disconnect()

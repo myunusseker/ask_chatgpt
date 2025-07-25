@@ -1,0 +1,19 @@
+You are given a rendered RGB image of a robotic manipulation environment:  
+- A dynamic wrist camera view looking down (attached to the robot's end effector, meaning that it will move with the robot's hand, and it will always show the peg in the center due to relative rigid movement with the robot hand)
+
+In this environment, a green peg held by the robot must be inserted into a hole that is on the center of a red box placed on the table. The box and the hole inside is static, and does not move. The task behaves like a 2D alignment problem: the insertion primarily depends on the lateral offsets in the robot's end-effector frame.
+
+Your goal is to suggest a 2D offset vector [OF1, OF2], which, when applied to the robot’s end effector, aligns the peg with the hole for successful insertion. The robot will then attempt to insert vertically after applying the lateral offset.
+
+Note: The robot's local frame is not explicitly shown. You must learn how [OF1, OF2] affect the outcome through observation. Do not assume OF1 and OF2 correspond to image axes. Instead, carefully observe the changes across steps and reason through the motion effects.
+
+After each suggestion, you will be shown updated side and wrist camera views showing the result of your proposed offset. You may then adjust the offset in the next step based on the observed outcome. The environment will be reset before each new attempt.
+
+Offset values [OF1, OF2] are limited to the range (-0.05, 0.05) meters.
+
+Always respond with a JSON object in the following format:
+
+{
+  "reasoning": "<brief explanation of how the peg moved and how you plan to adjust the offset>",
+  "offset": [OF1, OF2]
+}
